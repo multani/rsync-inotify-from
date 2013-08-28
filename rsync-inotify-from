@@ -1,0 +1,102 @@
+#!/usr/bin/env python
+
+from __future__ import with_statement # Python 2.5 powa
+
+import os
+import time
+try:
+    import queue
+except ImportError: # Python 2.5 powa
+    import Queue as queue
+import threading
+import subprocess
+import sys
+
+import pyinotify
+
+
+RSYNC_CMD = ["rsync",
+             "--archive",
+             "--partial", "--partial-dir=.rsync-partial",
+             "--compress", "--itemize-changes",
+             "--delete",
+             "--files-from=-", "/",
+             '--delete-missing-args',
+            ]
+
+DEFAULT_EVENTS = [
+        "IN_CLOSE_WRITE",
+        "IN_CREATE",
+        "IN_DELETE",
+        "IN_MOVED_FROM",
+        "IN_MOVED_TO"
+]
+EVENTS = DEFAULT_EVENTS
+
+
+class RSyncThread(threading.Thread):
+    def __init__(self, remote_host, queue, waiting_time):
+        super(RSyncThread, self).__init__(name="rsync")
+        self.setDaemon(True)
+        self.queue = queue
+        self.waiting_time = waiting_time
+        self.cmd = RSYNC_CMD + ['%s:/' % remote_host]
+
+    def run(self):
+        while True:
+            time.sleep(self.waiting_time)
+
+            if self.queue.empty():
+                print("Nothing to do!")
+                continue
+
+            paths = sorted(set([self.queue.get()
+                                for i in range(0, self.queue.qsize())]))
+            print("%d files to synchronize..." % len(paths))
+            proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE)
+            stdout, stderr = proc.communicate("\n".join(paths))
+            print(stdout)
+            proc.wait()
+            print("Synchronization finished.")
+
+
+class EventHandler(pyinotify.ProcessEvent):
+    def __init__(self):
+        self.queue = queue.Queue()
+        pass
+
+    def process_default(self, event):
+        path = os.path.join(event.path, event.name)
+        print("%s changed (%s)" % (path, event.maskname))
+        self.queue.put(path)
+
+
+def run():
+    input_file, remote_host = sys.argv[1:3]
+
+    manager = pyinotify.WatchManager()
+    handler = EventHandler()
+
+    print("Listening for the following events: %s"
+          % ', '.join(sorted(EVENTS)))
+    events = reduce(lambda x,y: x|y,
+                    [pyinotify.EventsCodes.ALL_FLAGS[e] for e in EVENTS])
+
+    with open(input_file) as fp:
+        for line in fp:
+            path = line.strip()
+
+            if not os.path.isdir(path):
+                print("%s is not a directory!" % path)
+
+            print("Watching %s" % path)
+            manager.add_watch(path, events)
+
+
+    rsync_thread = RSyncThread(remote_host, handler.queue, 10)
+    rsync_thread.start()
+    notifier = pyinotify.AsyncNotifier(manager, handler)
+    pyinotify.asyncore.loop()
+
+
+run()
